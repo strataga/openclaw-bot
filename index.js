@@ -1,5 +1,5 @@
 // OpenClaw Bot - Multi-platform AI Assistant
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import express from "express";
 
 const app = express();
@@ -23,9 +23,9 @@ app.listen(PORT, () => {
   console.log(`Health server running on port ${PORT}`);
 });
 
-// Initialize Anthropic client
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
+// Initialize OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
 // System prompt for the AI
@@ -33,24 +33,24 @@ const SYSTEM_PROMPT = `You are a helpful AI assistant. Be concise, friendly, and
 Customer: ${process.env.CUSTOMER_NAME || "User"}
 Plan: ${process.env.PLAN || "standard"}`;
 
-// Chat with Claude
+// Chat with OpenAI
 async function chat(message, conversationHistory = []) {
   try {
     const messages = [
+      { role: "system", content: SYSTEM_PROMPT },
       ...conversationHistory,
       { role: "user", content: message },
     ];
 
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
       max_tokens: 1024,
-      system: SYSTEM_PROMPT,
       messages,
     });
 
-    return response.content[0].text;
+    return response.choices[0].message.content;
   } catch (error) {
-    console.error("Anthropic API error:", error);
+    console.error("OpenAI API error:", error);
     return "Sorry, I encountered an error. Please try again.";
   }
 }
@@ -228,8 +228,8 @@ async function main() {
   console.log(`Plan: ${process.env.PLAN}`);
   console.log(`Deployment ID: ${process.env.DEPLOYMENT_ID}`);
 
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.error("ERROR: ANTHROPIC_API_KEY is required");
+  if (!process.env.OPENAI_API_KEY) {
+    console.error("ERROR: OPENAI_API_KEY is required");
     process.exit(1);
   }
 
