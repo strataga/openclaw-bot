@@ -1,5 +1,5 @@
 // OpenClaw Bot - Multi-platform AI Assistant
-import OpenAI from "openai";
+// Supports: OpenAI, Anthropic, and Google Gemini
 import express from "express";
 
 const app = express();
@@ -16,6 +16,7 @@ app.get("/", (req, res) => {
     version: "1.0.0",
     customer: process.env.CUSTOMER_EMAIL,
     plan: process.env.PLAN,
+    aiProvider: getAIProvider(),
   });
 });
 
@@ -23,36 +24,153 @@ app.listen(PORT, () => {
   console.log(`Health server running on port ${PORT}`);
 });
 
-// Initialize OpenAI client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// Detect which AI provider to use based on available keys
+function getAIProvider() {
+  if (process.env.ANTHROPIC_API_KEY) return "anthropic";
+  if (process.env.OPENROUTER_API_KEY) return "openrouter";
+  if (process.env.OPENAI_API_KEY) return "openai";
+  if (process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY) return "gemini";
+  return null;
+}
 
 // System prompt for the AI
 const SYSTEM_PROMPT = `You are a helpful AI assistant. Be concise, friendly, and helpful.
 Customer: ${process.env.CUSTOMER_NAME || "User"}
 Plan: ${process.env.PLAN || "standard"}`;
 
-// Chat with OpenAI
-async function chat(message, conversationHistory = []) {
-  try {
-    const messages = [
-      { role: "system", content: SYSTEM_PROMPT },
-      ...conversationHistory,
-      { role: "user", content: message },
-    ];
+// Initialize AI clients lazily
+let openaiClient = null;
+let openrouterClient = null;
+let anthropicClient = null;
+let geminiModel = null;
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      max_tokens: 1024,
-      messages,
+async function getOpenAI() {
+  if (!openaiClient) {
+    const { default: OpenAI } = await import("openai");
+    openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  }
+  return openaiClient;
+}
+
+async function getOpenRouter() {
+  if (!openrouterClient) {
+    const { default: OpenAI } = await import("openai");
+    openrouterClient = new OpenAI({
+      apiKey: process.env.OPENROUTER_API_KEY,
+      baseURL: "https://openrouter.ai/api/v1",
     });
+  }
+  return openrouterClient;
+}
 
-    return response.choices[0].message.content;
+async function getAnthropic() {
+  if (!anthropicClient) {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
+  return anthropicClient;
+}
+
+async function getGemini() {
+  if (!geminiModel) {
+    const { GoogleGenerativeAI } = await import("@google/generative-ai");
+    const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY);
+    geminiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  }
+  return geminiModel;
+}
+
+// Chat with AI - auto-detects provider
+async function chat(message, conversationHistory = []) {
+  const provider = getAIProvider();
+
+  try {
+    switch (provider) {
+      case "openai":
+        return await chatOpenAI(message, conversationHistory);
+      case "openrouter":
+        return await chatOpenRouter(message, conversationHistory);
+      case "anthropic":
+        return await chatAnthropic(message, conversationHistory);
+      case "gemini":
+        return await chatGemini(message, conversationHistory);
+      default:
+        return "No AI provider configured. Please set OPENAI_API_KEY, OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY.";
+    }
   } catch (error) {
-    console.error("OpenAI API error:", error);
+    console.error(`${provider} API error:`, error);
     return "Sorry, I encountered an error. Please try again.";
   }
+}
+
+async function chatOpenAI(message, conversationHistory) {
+  const openai = await getOpenAI();
+  const messages = [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...conversationHistory,
+    { role: "user", content: message },
+  ];
+
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    max_tokens: 1024,
+    messages,
+  });
+
+  return response.choices[0].message.content;
+}
+
+async function chatOpenRouter(message, conversationHistory) {
+  const openrouter = await getOpenRouter();
+  const messages = [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...conversationHistory,
+    { role: "user", content: message },
+  ];
+
+  // Use Claude via OpenRouter by default, or configurable model
+  const model = process.env.OPENROUTER_MODEL || "anthropic/claude-3.5-sonnet";
+
+  const response = await openrouter.chat.completions.create({
+    model,
+    max_tokens: 1024,
+    messages,
+  });
+
+  return response.choices[0].message.content;
+}
+
+async function chatAnthropic(message, conversationHistory) {
+  const anthropic = await getAnthropic();
+  const messages = [
+    ...conversationHistory,
+    { role: "user", content: message },
+  ];
+
+  const response = await anthropic.messages.create({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 1024,
+    system: SYSTEM_PROMPT,
+    messages,
+  });
+
+  return response.content[0].text;
+}
+
+async function chatGemini(message, conversationHistory) {
+  const model = await getGemini();
+
+  // Build conversation context
+  const context = conversationHistory
+    .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+    .join("\n");
+
+  const fullPrompt = context
+    ? `${SYSTEM_PROMPT}\n\nConversation so far:\n${context}\n\nUser: ${message}\n\nAssistant:`
+    : `${SYSTEM_PROMPT}\n\nUser: ${message}\n\nAssistant:`;
+
+  const result = await model.generateContent(fullPrompt);
+  return result.response.text();
 }
 
 // Store conversation history per user
@@ -87,7 +205,7 @@ async function startTelegram() {
   const bot = new Telegraf(token);
 
   bot.start((ctx) => {
-    ctx.reply(`Hello! I'm your AI assistant. How can I help you today?`);
+    ctx.reply(`Hello! I'm your AI assistant powered by ${getAIProvider() || "AI"}. How can I help you today?`);
   });
 
   bot.on("text", async (ctx) => {
@@ -227,9 +345,10 @@ async function main() {
   console.log(`Customer: ${process.env.CUSTOMER_EMAIL}`);
   console.log(`Plan: ${process.env.PLAN}`);
   console.log(`Deployment ID: ${process.env.DEPLOYMENT_ID}`);
+  console.log(`AI Provider: ${getAIProvider() || "NONE - please configure an API key"}`);
 
-  if (!process.env.OPENAI_API_KEY) {
-    console.error("ERROR: OPENAI_API_KEY is required");
+  if (!getAIProvider()) {
+    console.error("ERROR: No AI API key configured. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY.");
     process.exit(1);
   }
 
